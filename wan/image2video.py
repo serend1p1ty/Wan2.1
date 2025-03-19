@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from functools import partial
 
 import numpy as np
+import peft
 import torch
 import torch.cuda.amp as amp
 import torch.distributed as dist
@@ -32,6 +33,7 @@ class WanI2V:
         self,
         config,
         checkpoint_dir,
+        lora_dir=None,
         device_id=0,
         rank=0,
         t5_fsdp=False,
@@ -118,6 +120,15 @@ class WanI2V:
 
         if dist.is_initialized():
             dist.barrier()
+
+        if lora_dir:
+            print("LoRA is enabled.")
+            self.model.hf_device_map = None
+            self.model = peft.PeftModel.from_pretrained(self.model, lora_dir)
+
+        # if torch.distributed.get_rank() == 0:
+        #     import ipdb; ipdb.set_trace(context=7)
+
         if dit_fsdp:
             self.model = shard_fn(self.model)
         else:

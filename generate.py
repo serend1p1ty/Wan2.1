@@ -8,6 +8,7 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
+import json
 import torch, random
 import torch.distributed as dist
 from PIL import Image
@@ -95,6 +96,11 @@ def _parse_args():
         type=str,
         default=None,
         help="The path to the checkpoint directory.")
+    parser.add_argument(
+        "--lora_dir",
+        type=str,
+        default=None,
+        help="The path to the lora directory.")
     parser.add_argument(
         "--offload_model",
         type=str2bool,
@@ -322,41 +328,42 @@ def generate(args):
             offload_model=args.offload_model)
 
     else:
-        if args.prompt is None:
-            args.prompt = EXAMPLE_PROMPT[args.task]["prompt"]
-        if args.image is None:
-            args.image = EXAMPLE_PROMPT[args.task]["image"]
+        # if args.prompt is None:
+        #     args.prompt = EXAMPLE_PROMPT[args.task]["prompt"]
+        # if args.image is None:
+        #     args.image = EXAMPLE_PROMPT[args.task]["image"]
         logging.info(f"Input prompt: {args.prompt}")
         logging.info(f"Input image: {args.image}")
 
-        img = Image.open(args.image).convert("RGB")
-        if args.use_prompt_extend:
-            logging.info("Extending prompt ...")
-            if rank == 0:
-                prompt_output = prompt_expander(
-                    args.prompt,
-                    tar_lang=args.prompt_extend_target_lang,
-                    image=img,
-                    seed=args.base_seed)
-                if prompt_output.status == False:
-                    logging.info(
-                        f"Extending prompt failed: {prompt_output.message}")
-                    logging.info("Falling back to original prompt.")
-                    input_prompt = args.prompt
-                else:
-                    input_prompt = prompt_output.prompt
-                input_prompt = [input_prompt]
-            else:
-                input_prompt = [None]
-            if dist.is_initialized():
-                dist.broadcast_object_list(input_prompt, src=0)
-            args.prompt = input_prompt[0]
-            logging.info(f"Extended prompt: {args.prompt}")
+        # img = Image.open(args.image).convert("RGB")
+        # if args.use_prompt_extend:
+        #     logging.info("Extending prompt ...")
+        #     if rank == 0:
+        #         prompt_output = prompt_expander(
+        #             args.prompt,
+        #             tar_lang=args.prompt_extend_target_lang,
+        #             image=img,
+        #             seed=args.base_seed)
+        #         if prompt_output.status == False:
+        #             logging.info(
+        #                 f"Extending prompt failed: {prompt_output.message}")
+        #             logging.info("Falling back to original prompt.")
+        #             input_prompt = args.prompt
+        #         else:
+        #             input_prompt = prompt_output.prompt
+        #         input_prompt = [input_prompt]
+        #     else:
+        #         input_prompt = [None]
+        #     if dist.is_initialized():
+        #         dist.broadcast_object_list(input_prompt, src=0)
+        #     args.prompt = input_prompt[0]
+        #     logging.info(f"Extended prompt: {args.prompt}")
 
         logging.info("Creating WanI2V pipeline.")
         wan_i2v = wan.WanI2V(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
+            lora_dir=args.lora_dir,
             device_id=device,
             rank=rank,
             t5_fsdp=args.t5_fsdp,
@@ -366,46 +373,80 @@ def generate(args):
         )
 
         logging.info("Generating video ...")
-        video = wan_i2v.generate(
-            args.prompt,
-            img,
-            max_area=MAX_AREA_CONFIGS[args.size],
-            frame_num=args.frame_num,
-            shift=args.sample_shift,
-            sample_solver=args.sample_solver,
-            sampling_steps=args.sample_steps,
-            guide_scale=args.sample_guide_scale,
-            seed=args.base_seed,
-            offload_model=args.offload_model)
 
-    if rank == 0:
-        if args.save_file is None:
-            formatted_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-            formatted_prompt = args.prompt.replace(" ", "_").replace("/",
-                                                                     "_")[:50]
-            suffix = '.png' if "t2i" in args.task else '.mp4'
-            args.save_file = f"{args.task}_{args.size.replace('*','x') if sys.platform=='win32' else args.size}_{args.ulysses_size}_{args.ring_size}_{formatted_prompt}_{formatted_time}" + suffix
+        # 确保输出目录存在
+        output_dir = "output"
+        os.makedirs(output_dir, exist_ok=True)
 
-        if "t2i" in args.task:
-            logging.info(f"Saving generated image to {args.save_file}")
-            cache_image(
-                tensor=video.squeeze(1)[None],
-                save_file=args.save_file,
-                nrow=1,
-                normalize=True,
-                value_range=(-1, 1))
-        else:
-            logging.info(f"Saving generated video to {args.save_file}")
-            cache_video(
-                tensor=video[None],
-                save_file=args.save_file,
-                fps=cfg.sample_fps,
-                nrow=1,
-                normalize=True,
-                value_range=(-1, 1))
+        # 读取JSON文件
+        with open("wan_i2v_infer_data.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        # 遍历处理每张图片
+        for image_path, prompt in data.items():
+            # 生成输出文件路径
+            output_filename = os.path.splitext(os.path.basename(image_path))[0] + ".mp4"
+            output_path = os.path.join(output_dir, output_filename)
+
+            if os.path.exists(output_path):
+                print(f"输出文件已存在: {output_path}")
+                continue
+
+            print(f"处理图片: {image_path}")
+            print(f"提示词: {prompt}")
+            print(f"输出到: {output_path}")
+
+            img = Image.open(image_path).convert("RGB")
+            video = wan_i2v.generate(
+                prompt,
+                img,
+                max_area=MAX_AREA_CONFIGS[args.size],
+                frame_num=args.frame_num,
+                shift=args.sample_shift,
+                sample_solver=args.sample_solver,
+                sampling_steps=args.sample_steps,
+                guide_scale=args.sample_guide_scale,
+                seed=args.base_seed,
+                offload_model=args.offload_model)
+
+            if rank == 0:
+                cache_video(
+                    tensor=video[None],
+                    save_file=output_path,
+                    fps=cfg.sample_fps,
+                    nrow=1,
+                    normalize=True,
+                    value_range=(-1, 1))
+
+    # if rank == 0:
+    #     if args.save_file is None:
+    #         formatted_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    #         formatted_prompt = args.prompt.replace(" ", "_").replace("/",
+    #                                                                  "_")[:50]
+    #         suffix = '.png' if "t2i" in args.task else '.mp4'
+    #         args.save_file = f"{args.task}_{args.size.replace('*','x') if sys.platform=='win32' else args.size}_{args.ulysses_size}_{args.ring_size}_{formatted_prompt}_{formatted_time}" + suffix
+
+    #     if "t2i" in args.task:
+    #         logging.info(f"Saving generated image to {args.save_file}")
+    #         cache_image(
+    #             tensor=video.squeeze(1)[None],
+    #             save_file=args.save_file,
+    #             nrow=1,
+    #             normalize=True,
+    #             value_range=(-1, 1))
+    #     else:
+    #         logging.info(f"Saving generated video to {args.save_file}")
+    #         cache_video(
+    #             tensor=video[None],
+    #             save_file=args.save_file,
+    #             fps=cfg.sample_fps,
+    #             nrow=1,
+    #             normalize=True,
+    #             value_range=(-1, 1))
     logging.info("Finished.")
 
 
 if __name__ == "__main__":
     args = _parse_args()
     generate(args)
+
